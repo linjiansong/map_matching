@@ -1,6 +1,6 @@
 import sys
 import os
-import json
+import time
 import numpy as np
 from openpyxl import load_workbook
 from pykml import parser
@@ -10,6 +10,8 @@ import multiprocessing
 
 current_dir = os.path.dirname(os.path.abspath(__file__))
 sys.path.append(os.path.join(current_dir, "../.."))
+
+from util import lla2enu
 
 PI = 3.1415926535897932384626  # π
 
@@ -28,6 +30,7 @@ def ParseKmlData(kml_path):
 
     traj_enu_points = []
     count = 1
+    print("len(placemarks) = {}".format(len(placemarks)))
     for placemark in placemarks:
         for coordinate in placemark.LineString.coordinates.text.strip().split("\n"):
                 parts = coordinate.split(',')
@@ -35,16 +38,19 @@ def ParseKmlData(kml_path):
                 latitude = float(parts[1])
                 # print(longitude, latitude)
                 count += 1
-                # if len(anchor) == 0:
-                #     anchor = np.array([longitude * PI / 180, latitude * PI / 180, 0])
+                if len(anchor) == 0:
+                    anchor = np.array([longitude * PI / 180, latitude * PI / 180, 0])
 
-                # enu_point = lla2enu(longitude * PI / 180, latitude * PI / 180, 0, anchor)[0][0]
-                # traj_enu_points.append(enu_point)
-
+                enu_point = lla2enu(longitude * PI / 180, latitude * PI / 180, 0, anchor)
+                traj_enu_points.append(enu_point)
+    print("count = {}".format(count))
     return traj_enu_points, anchor
 
 
 
 if __name__ == "__main__":
     kml_file = "./data/xian_road.kml"
+    t1 = time.time()
     ParseKmlData = ParseKmlData(kml_file)
+    t2 = time.time()
+    print("t2 - t1 = {}".format(t2 - t1))
