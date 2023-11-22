@@ -14,11 +14,14 @@ from util import lla2enu
 
 PI = 3.1415926535897932384626  # π
 
+
 def ParseKmlData(kml_path):
     # 解析KML文件
     kml_data = None
     unique_anchor = []
-    with open(kml_path, 'r') as f:
+    road_segments = {}  # 存储路段连接关系的字典，使用唯一的segment_id作为key
+
+    with open(kml_path, 'r' ,encoding='utf-8') as f:
         kml_data = parser.parse(f).getroot()
 
     # 定义命名空间
@@ -28,32 +31,33 @@ def ParseKmlData(kml_path):
     placemarks = kml_data.findall('.//kml:Placemark', namespace)
 
     # 遍历Placemark元素
-    road_segment_by_name = {}
     for place_mark_idx, placemark in enumerate(placemarks):
         # description_dict = xmltodict.parse(placemark.description.text.strip())
         description_dict = json.loads(placemark.description.text.strip())
         road_name = description_dict['Name']
         if len(road_name) == 0:
             road_name = "无名路" + str(place_mark_idx)
+        segment_id = road_name + "_" + str(place_mark_idx)  # 使用路名和索引组合作为segment_id
+
+        if road_name in road_segments:
+            print("Error: road_name {} already exists!".format(road_name))
+            continue
 
         road_enu_points = []
         # 这里需要特别注意，不同的kml文件，LineString的坐标点的分隔符可能是空格，也可能是换行符
         for coordinate in placemark.LineString.coordinates.text.strip().split("\n"):
-                parts = coordinate.split(',')
-                longitude = float(parts[0])
-                latitude = float(parts[1])
-                if len(unique_anchor) == 0:
-                    unique_anchor = np.array([longitude * PI / 180, latitude * PI / 180, 0])
+            parts = coordinate.split(',')
+            longitude = float(parts[0])
+            latitude = float(parts[1])
+            if len(unique_anchor) == 0:
+                unique_anchor = np.array([longitude * PI / 180, latitude * PI / 180, 0])
 
-                enu_point = lla2enu(longitude * PI / 180, latitude * PI / 180, 0, unique_anchor)
-                road_enu_points.append(enu_point)
-        for segment_idx in range(len(road_enu_points) - 1):
-            road_segment_name = road_name + "_" + str(segment_idx)
-            if road_segment_name in road_segment_by_name:
-                print("Error: road_segment_name {} already exists!".format(road_segment_name))
-            road_segment_by_name[road_segment_name] = road_enu_points[segment_idx:segment_idx + 2]
-        
-    return road_segment_by_name, unique_anchor
+            enu_point = lla2enu(longitude * PI / 180, latitude * PI / 180, 0, unique_anchor)
+            road_enu_points.append(enu_point)
+
+        road_segments[segment_id] = road_enu_points
+
+    return road_segments, unique_anchor
 
 
 if __name__ == "__main__":
