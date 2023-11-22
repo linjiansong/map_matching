@@ -27,14 +27,14 @@ def ParseKmlData(kml_path):
     # 查找Placemark元素
     placemarks = kml_data.findall('.//kml:Placemark', namespace)
 
-    count = 1
-    print("len(placemarks) = {}".format(len(placemarks)))
-
+    # 遍历Placemark元素
     road_segment_by_name = {}
-    for placemark in placemarks:
+    for place_mark_idx, placemark in enumerate(placemarks):
         # description_dict = xmltodict.parse(placemark.description.text.strip())
         description_dict = json.loads(placemark.description.text.strip())
         road_name = description_dict['Name']
+        if len(road_name) == 0:
+            road_name = "无名路" + str(place_mark_idx)
 
         road_enu_points = []
         # 这里需要特别注意，不同的kml文件，LineString的坐标点的分隔符可能是空格，也可能是换行符
@@ -49,9 +49,10 @@ def ParseKmlData(kml_path):
                 road_enu_points.append(enu_point)
         for segment_idx in range(len(road_enu_points) - 1):
             road_segment_name = road_name + "_" + str(segment_idx)
+            if road_segment_name in road_segment_by_name:
+                print("Error: road_segment_name {} already exists!".format(road_segment_name))
             road_segment_by_name[road_segment_name] = road_enu_points[segment_idx:segment_idx + 2]
         
-    print("count = {}".format(count))
     return road_segment_by_name, unique_anchor
 
 
