@@ -1,12 +1,20 @@
 import simplekml
+import sys
+import os
 
-def SaveTrajecoryAlKml(traj_points, file_path):
+current_dir = os.path.dirname(os.path.abspath(__file__))
+sys.path.append(os.path.join(current_dir, "../.."))
+
+from util import gcj02_to_wgs84
+
+def SaveTrajecoryAsKml(traj_points, file_path):
     kml = simplekml.Kml()
 
     # add line elements
     line = kml.newlinestring(name="traj")
     for point in traj_points:
-        line.coords.addcoordinates([(point[1], point[2], 0)])
+        lontitute, latitute = gcj02_to_wgs84(point[1], point[2])
+        line.coords.addcoordinates([(lontitute, latitute, 0)])
 
     line.style.linestyle.color = simplekml.Color.red
     line.style.linestyle.width = 3
@@ -36,7 +44,7 @@ def ParseTrajectories(traj_path):
             continue
         traj_points.sort(key=lambda x: x[0])
         valid_traj_num += 1
-        SaveTrajecoryAlKml(traj_points, "./data/trajectories/{}.kml".format(order_id))
+        SaveTrajecoryAsKml(traj_points, "./data/trajectories/{}.kml".format(order_id))
     print("valid_traj_num = {}".format(valid_traj_num))
 
 if __name__ == "__main__":
