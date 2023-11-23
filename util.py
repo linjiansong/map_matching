@@ -43,10 +43,8 @@ def xyz2enu(xyz, anchor):
     enu = np.hstack((relX, relY, relZ)).dot(Rn2e)
     return enu
 
-def lla2enu(lon: np.ndarray, lat: np.ndarray, alt: np.ndarray, anchor=None):
+def lla2enu(lon, lat, alt, anchor):
     x, y, z = lla2xyz(lon, lat, alt)
     xyz = np.hstack((x, y, z))
-    if anchor is None:
-        anchor = np.array([lon[0], lat[0], alt[0]]).ravel()
     enu = xyz2enu(xyz, anchor)
-    return enu, anchor
+    return enu
