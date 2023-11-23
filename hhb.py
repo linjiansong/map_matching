@@ -32,9 +32,10 @@ def ParseKmlData(kml_path):
     for place_mark_idx, placemark in enumerate(placemarks):
         # description_dict = xmltodict.parse(placemark.description.text.strip())
         description_dict = json.loads(placemark.description.text.strip())
-        road_name = str(place_mark_idx) + "_" + description_dict['Name']
+        road_name = description_dict['Name']
         if len(road_name) == 0:
-            road_name = str(place_mark_idx) + "_无名路"
+            road_name = "无名路"
+        road_name = str(place_mark_idx) + "_" + road_name # 为了防止同名路，这里加上序号
 
         road_enu_points = []
         # 这里需要特别注意，不同的kml文件，LineString的坐标点的分隔符可能是空格，也可能是换行符
@@ -61,41 +62,39 @@ def FindConnection(road_segment_by_name):
     for road_name, road_segment in road_segments:
         connection_info[road_name] = []
 
-    for i in range(len(road_segments) - 1):
-        tgt_name, tgt_segment = road_segments[i]
-        tgt_s_point = tgt_segment[0]
-        tgt_e_point = tgt_segment[-1]
-        for j in range(i + 1, len(road_segments)):
-            src_name, src_segment = road_segments[j]
-            src_s_point = src_segment[0]
-            src_e_point = src_segment[-1]
+    resolution = 0.1
+    road_name_by_pixel = {}
+    for road_name, road_segment in road_segments:
+        start = road_segment[0]
+        end = road_segment[-1]
+        for point in [start, end]:
+            key = tuple((point[0:2] / resolution).astype(np.int32))
+            if key in road_name_by_pixel:
+                road_name_by_pixel[key].append(road_name)
+            else:
+                road_name_by_pixel[key] = [road_name]
 
-            if np.linalg.norm(tgt_s_point - src_s_point) < 1e-3:
-                connection_info[tgt_name].append(src_name)
-                connection_info[src_name].append(tgt_name)
-            elif np.linalg.norm(tgt_s_point - src_e_point) < 1e-3:
-                connection_info[tgt_name].append(src_name)
-                connection_info[src_name].append(tgt_name)
-            elif np.linalg.norm(tgt_e_point - src_s_point) < 1e-3:
-                connection_info[tgt_name].append(src_name)
-                connection_info[src_name].append(tgt_name)
-            elif np.linalg.norm(tgt_e_point - src_e_point) < 1e-3:
-                connection_info[tgt_name].append(src_name)
-                connection_info[src_name].append(tgt_name)
-            print("----------------")
-    return connection_info
-
+    return road_name_by_pixel
     
-def GetTransformProbability(road_segment_names, connection_info):
+def GetTransformProbability(road_segment_by_name):
+    road_segment_names = list(road_segment_by_name.keys())
+
+    road_name_by_pixel = FindConnection(road_segment_by_name)
+
+    resolution = 0.1
     # row is current state, column is next state
     transform_probability = np.zeros((len(road_segment_names), len(road_segment_names)))
-    for road_idx, road_segment_name in enumerate(road_segment_names):
-        neighbor_road_segments = connection_info[road_segment_name]
+    for road_idx, road_name in enumerate(road_segment_names):
+        road_segment = road_segment_by_name[road_name]
+        start_key = tuple((road_segment[0][0:2] / resolution).astype(np.int32))
+        end_key = tuple((road_segment[-1][0:2] / resolution).astype(np.int32))
 
-        total_relation = len(neighbor_road_segments) + 1
-        probability = 1.0 / total_relation
+        neighbor_road_segments = set()
+        neighbor_road_segments.update(road_name_by_pixel[start_key])
+        neighbor_road_segments.update(road_name_by_pixel[end_key])
 
-        transform_probability[road_idx, road_idx] = probability
+        probability = 1.0 / len(neighbor_road_segments)
+
         for road_segment_name in neighbor_road_segments:
             neighbor_road_idx = road_segment_names.index(road_segment_name)
             transform_probability[road_idx, neighbor_road_idx] = probability
@@ -109,7 +108,7 @@ if __name__ == "__main__":
     road_segment_by_name, unique_anchor = ParseKmlData(kml_file)
     connection_info = FindConnection(road_segment_by_name)
     road_segment_names = list(road_segment_by_name.keys())
-    transform_probability = GetTransformProbability(road_segment_names, connection_info)
+    transform_probability = GetTransformProbability(road_segment_by_name)
 
     t2 = time.time()
     print("t2 - t1 = {}".format(t2 - t1))
