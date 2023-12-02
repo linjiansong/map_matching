@@ -50,6 +50,59 @@ def lla2enu(lon, lat, alt, anchor):
     enu = xyz2enu(xyz, anchor)
     return enu
 
+
+def enu2xyz(enu, anchor):
+    lon0 = anchor[0]
+    lat0 = anchor[1]
+    alt0 = anchor[2]
+    Rn2e = ll2Rne(lon0, lat0)
+    x0, y0, z0 = lla2xyz(lon0, lat0, alt0)
+    xyz = enu.dot(Rn2e.T)
+    x = xyz[0]
+    y = xyz[1]
+    z = xyz[2]
+    absX = x + x0
+    absY = y + y0
+    absZ = z + z0
+    xyz = np.hstack((absX, absY, absZ))
+    return xyz
+
+def xyz2lla(x, y, z):
+    a = 6378137.0  # semi-major axis
+    e = 1 / 298.257223563  # flattening
+    e1s = 0.00669437999013  # 1st-eccentricity
+
+    L = np.arctan2(y, x)
+    tmpB = z / np.sqrt(x ** 2 + y ** 2)
+    B = np.arctan(tmpB / (1 - e) ** 2)
+
+    maxItrNum = 500
+
+    oldB = B
+    err = 10
+    thre = 1e-15
+    itrNum = 0
+
+    while err >= thre:
+        R1 = x / (np.cos(L) * np.cos(B))
+        R2 = a / np.sqrt(np.cos(B) * np.cos(B) + (1 - e1s) * np.sin(B) * np.sin(B))
+        B = np.arctan(tmpB * R1 / (R1 - R2 * e1s))
+        err = abs(oldB - B)
+        oldB = B
+        itrNum += 1
+        if itrNum > maxItrNum:
+            break
+    H = R1 - R2
+    lat = B
+    lon = L
+    alt = H
+    return lon, lat, alt
+
+def enu2lla(enu, anchor):
+    xyz = enu2xyz(enu, anchor)
+    lon, lat, alt = xyz2lla(xyz[0], xyz[1], xyz[2])
+    return lon, lat, alt
+
 def transformlat(lng, lat):
     ret = -100.0 + 2.0 * lng + 3.0 * lat + 0.2 * lat * lat + \
         0.1 * lng * lat + 0.2 * math.sqrt(math.fabs(lng))

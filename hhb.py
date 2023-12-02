@@ -7,24 +7,37 @@ import xmltodict
 import json
 import simplekml
 import math
+from scipy.spatial import KDTree
 
 current_dir = os.path.dirname(os.path.abspath(__file__))
 sys.path.append(os.path.join(current_dir, "../.."))
 
-from util import lla2enu
+from util import lla2enu, enu2lla
 
 PI = 3.1415926535897932384626  # π
+
+class StampedPoint:
+    def __init__(self, point, time_stamp):
+        self.point = point
+        self.time_stamp = time_stamp
 
 class MapMatchingByHMM:
     def __init__(self) -> None:
         self.road_segment_by_name = None
         self.road_segment_names = None
         self.transform_probability = None
+        self.road_connection = None
 
     def SetRoadNetwork(self, road_segment_by_name):
         self.road_segment_by_name = road_segment_by_name
         self.road_segment_names = list(road_segment_by_name.keys())
-        self.transform_probability = self.GetTransformProbability()
+        self.transform_probability, self.road_connection = self.GetTransformProbability()
+
+        all_start_points = []
+        for road_segment_name, road_segment in road_segment_by_name.items():
+            start_point = road_segment[0]
+            all_start_points.append(start_point[0:2])
+        self.kdtree = KDTree(all_start_points)
 
     def FindConnection(self, resolution):
         road_segments = list(self.road_segment_by_name.items())
@@ -48,6 +61,8 @@ class MapMatchingByHMM:
         resolution = 0.1
         road_name_by_pixel = self.FindConnection(resolution)
 
+        road_connection = {}
+
         # row is current state, column is next state
         transform_probability = numpy.zeros((len(self.road_segment_names), len(self.road_segment_names)))
         for road_idx, road_name in enumerate(self.road_segment_names):
@@ -64,7 +79,9 @@ class MapMatchingByHMM:
             for road_segment_name in neighbor_road_segments:
                 neighbor_road_idx = self.road_segment_names.index(road_segment_name)
                 transform_probability[road_idx, neighbor_road_idx] = probability
-        return transform_probability
+
+            road_connection[road_name] = list(neighbor_road_segments)
+        return transform_probability, road_connection
     
     def GetProjectPoint(self, start_pt, end_pt, src_pt):
         tgt_vector = (end_pt - start_pt)[0:2]
@@ -109,15 +126,51 @@ class MapMatchingByHMM:
                 part_state_sequence.append(self.road_segment_names[prev_road_idx])
                 curr_road_idx = prev_road_idx
             part_state_sequence.reverse()
-
         return part_state_sequence
+    
+    def GenerateDebugFile(self, enu_traj_points, all_state_probabilities, optimal_paths):
+        kml = simplekml.Kml()
+        road_segments = list(self.road_segment_by_name.items())
+        for road_name, road_segment in road_segments:
+            line = kml.newlinestring(name=road_name)
+            for point in road_segment:
+                line.coords.addcoordinates([(point[0], point[1], 0)])
+            line.style.linestyle.color = simplekml.Color.red
+            line.style.linestyle.width = 3
+
+        for point_idx, point in enumerate(enu_traj_points):
+            point = numpy.array(point)
+            point[2] = 0
+            pnt = kml.newpoint(name=str(point_idx), coords=[tuple(point)])
+            pnt.style.iconstyle.icon.href = 'http://maps.google.com/mapfiles/kml/shapes/placemark_circle.png'
+            pnt.style.iconstyle.scale = 0.5
+
+        for point_idx, point in enumerate(enu_traj_points):
+            for road_idx, road_name in enumerate(self.road_segment_names):
+                if all_state_probabilities[point_idx, road_idx] > 0:
+                    point = numpy.array(point)
+                    point[2] = 0
+                    pnt = kml.newpoint(name=str(point_idx) + "_" + road_name, coords=[tuple(point)])
+                    pnt.style.iconstyle.icon.href = 'http://maps.google.com/mapfiles/kml/shapes/placemark_circle_highlight.png'
+                    pnt.style.iconstyle.scale = 0.5
+
+        for point_idx, point in enumerate(enu_traj_points):
+            for road_idx, road_name in enumerate(self.road_segment_names):
+                if optimal_paths[point_idx][road_idx] is not None:
+                    point = numpy.array(point)
+                    point[2] = 0
+                    pnt = kml.newpoint(name=str(point_idx) + "_" + road_name, coords=[tuple(point)])
+                    pnt.style.iconstyle.icon.href = 'http://maps.google.com/mapfiles/kml/shapes/placemark_circle_highlight.png'
+                    pnt.style.iconstyle.scale = 0.5
+
+        kml.save("./data/debug.kml")
 
     def FindMatchedPath(self, enu_traj_points):
         if self.road_segment_by_name is None:
             print("Error: road network is not set!")
             return None
         
-        probability = numpy.zeros((len(enu_traj_points), len(self.road_segment_names)))
+        all_state_probabilities = numpy.zeros((len(enu_traj_points), len(self.road_segment_names)))
         min_probability = 1e-9
 
         s_point_idx = 0
@@ -125,56 +178,71 @@ class MapMatchingByHMM:
         optimal_paths = [] # store prev optimal road index
         while (s_point_idx < len(enu_traj_points)):
             # initialize probability
-            s_traj_point = enu_traj_points[s_point_idx]           
+            s_traj_point = enu_traj_points[s_point_idx]         
             prev_optimal_path = []
-            t1 = time.time()
-            for road_idx, road_segment_name in enumerate(self.road_segment_names):
+
+            for road_segment_idx in range(len(self.road_segment_names)):
+                prev_optimal_path.append(road_segment_idx) # init prev optimal path is current road index
+                all_state_probabilities[s_point_idx, road_segment_idx] = 0.0
+
+            radius = 300
+            indices = self.kdtree.query_ball_point(s_traj_point.point[0:2], radius)
+            for road_segment_idx in indices:
+                road_segment_name = self.road_segment_names[road_segment_idx]
                 road_segment = self.road_segment_by_name[road_segment_name]
-                probability[s_point_idx, road_idx] = self.GetOberservationProbability(road_segment, s_traj_point)
-                prev_optimal_path.append(road_idx) # init prev optimal path is current road index
-            optimal_paths.append(optimal_paths)
-            t2 = time.time()
-            print("take {}s to initialize probability".format(t2 - t1))
+                all_state_probabilities[s_point_idx, road_segment_idx] = self.GetOberservationProbability(road_segment, s_traj_point.point)
+                
+            optimal_paths.append(prev_optimal_path)
 
             e_point_idx = s_point_idx
             for point_idx in range(s_point_idx + 1, len(enu_traj_points)):
-                prev_probability = probability[point_idx - 1, :]
+                prev_state_probabilities = all_state_probabilities[point_idx - 1, :]
                 e_point_idx = point_idx
+               
+                prev_state_probabilities /= numpy.sum(prev_state_probabilities) # normalize
 
-                if (numpy.max(prev_probability, axis=0) < min_probability):
-                    e_point_idx -= 1
-                    break
+                # t3 = time.time()
+                prev_optimal_path = [None] * len(self.road_segment_names)
+                for curr_road_segment_idx, state_probability in enumerate(prev_state_probabilities):
+                    if state_probability < min_probability:
+                        continue
+                    road_segment_name = self.road_segment_names[curr_road_segment_idx]
+                    next_maybe_road_segment_names = self.road_connection[road_segment_name]
+                    transform_probability = 1 / len(next_maybe_road_segment_names)
+                    for next_maybe_road_segment_name in next_maybe_road_segment_names:
+                        fuse_probability = state_probability * transform_probability
+                        next_maybe_road_segment_idx = self.road_segment_names.index(next_maybe_road_segment_name)
+
+                        if fuse_probability > all_state_probabilities[point_idx, next_maybe_road_segment_idx]:
+                            all_state_probabilities[point_idx, next_maybe_road_segment_idx] = fuse_probability
+                            prev_optimal_path[next_maybe_road_segment_idx] = curr_road_segment_idx
+                optimal_paths.append(prev_optimal_path)
+                # print("point_idx = {}, optimal_paths = {}".format(point_idx, len(optimal_paths)))
                 
-                prev_probability /= numpy.sum(prev_probability) # normalize
+                # t4 = time.time()
+                # print("take {}s to calculate next state".format(t4 - t3))  
 
-                t4 = time.time()
-                fuse_probability = numpy.zeros((len(self.road_segment_names), len(self.road_segment_names)))
-                for road_idx in range(len(self.road_segment_names)):
-                    fuse_probability[road_idx] = self.transform_probability[road_idx] * prev_probability[road_idx]
-                t5 = time.time()
-                print("take {}s to fuse probability".format(t5 - t4))
-
-                probability[point_idx] = numpy.max(fuse_probability, axis=0) # max probability of a column
-                column_max_indices = numpy.argmax(fuse_probability, axis=0) # max probability road index of a column
-                optimal_paths.append(column_max_indices)
-                t6 = time.time()
-                print("take {}s to get path".format(t6 - t5))
-
-                for road_idx, road_segment_name in enumerate(self.road_segment_names):
-                    road_segment = self.road_segment_by_name[road_segment_name]
+                count = 0
+                for road_segment_idx, road_segment_name in enumerate(self.road_segment_names):
                     observation_probability = 0.0
-                    if probability[point_idx, road_idx] > min_probability:
+                    if all_state_probabilities[point_idx, road_segment_idx] > min_probability:
                         curr_traj_point = enu_traj_points[point_idx]
-                        observation_probability = self.GetOberservationProbability(road_segment, curr_traj_point)
-                    probability[point_idx, road_idx] *= observation_probability
-                t7 = time.time()
-                print("take {}s to calculate probability, point idx = {}".format(t7 - t6, point_idx))  
+                        road_segment = self.road_segment_by_name[road_segment_name]
+                        observation_probability = self.GetOberservationProbability(road_segment, curr_traj_point.point)
+                        count += 1
+                    all_state_probabilities[point_idx, road_segment_idx] *= observation_probability
+                # t5 = time.time()
+                # print("take {}s to calculate final state, point idx = {}".format(t5 - t4, point_idx))
 
-            part_state_sequence = self.GetBestStateQueue(probability, optimal_paths, s_point_idx, e_point_idx)
+                if (numpy.max(all_state_probabilities[point_idx], axis=0) < min_probability):
+                    e_point_idx -= 1
+                    optimal_paths.pop() # remove last optimal path
+                    break
+
+            part_state_sequence = self.GetBestStateQueue(all_state_probabilities, optimal_paths, s_point_idx, e_point_idx)
             state_sequence.extend(part_state_sequence)
-            s_point_idx = e_point_idx + 1  
-        
-        return []
+            s_point_idx = e_point_idx + 1
+        return state_sequence
 
 def ParseRoadNetworkKmlData(kml_path):
     # 解析KML文件
@@ -218,6 +286,30 @@ def ParseRoadNetworkKmlData(kml_path):
         
     return road_segment_by_name, unique_anchor
 
+# def ParseTrajectoryKmlData(kml_path, unique_anchor):
+#     # 解析KML文件
+#     kml_data = None
+#     with open(kml_path, 'r') as f:
+#         kml_data = parser.parse(f).getroot()
+
+#     # 定义命名空间
+#     namespace = {'kml': 'http://www.opengis.net/kml/2.2'}
+
+#     # 查找Placemark元素
+#     placemarks = kml_data.findall('.//kml:Placemark', namespace)
+
+#     # 遍历Placemark元素
+#     traj_points = []
+#     for placemark in placemarks:
+#         # 这里需要特别注意，不同的kml文件，LineString的坐标点的分隔符可能是空格，也可能是换行符
+#         for coordinate in placemark.LineString.coordinates.text.strip().split(" "):
+#                 parts = coordinate.split(',')
+#                 longitude = float(parts[0])
+#                 latitude = float(parts[1])
+#                 enu_point = lla2enu(longitude * PI / 180, latitude * PI / 180, 0, unique_anchor)
+#                 traj_points.append(enu_point)
+#     return traj_points
+
 def ParseTrajectoryKmlData(kml_path, unique_anchor):
     # 解析KML文件
     kml_data = None
@@ -230,17 +322,37 @@ def ParseTrajectoryKmlData(kml_path, unique_anchor):
     # 查找Placemark元素
     placemarks = kml_data.findall('.//kml:Placemark', namespace)
 
-    # 遍历Placemark元素
     traj_points = []
+    # 遍历Placemark元素
     for placemark in placemarks:
-        # 这里需要特别注意，不同的kml文件，LineString的坐标点的分隔符可能是空格，也可能是换行符
-        for coordinate in placemark.LineString.coordinates.text.strip().split(" "):
-                parts = coordinate.split(',')
-                longitude = float(parts[0])
-                latitude = float(parts[1])
-                enu_point = lla2enu(longitude * PI / 180, latitude * PI / 180, 0, unique_anchor)
-                traj_points.append(enu_point)
+        time_stamp = int(placemark.TimeStamp.when.text)
+        point = placemark.Point.coordinates.text.strip().split(',')
+        longitude = float(point[0])
+        latitude = float(point[1])
+        enu_point = lla2enu(longitude * PI / 180, latitude * PI / 180, 0, unique_anchor)
+        stamped_point = StampedPoint(enu_point, time_stamp)
+        traj_points.append(stamped_point)
+
     return traj_points
+
+def GenerateDebugFile(unique_anchor, road_segment_by_name, optimal_paths, file_path):
+    relevant_road_segment_names = set()
+    for road_segment_name in optimal_paths:
+        relevant_road_segment_names.add(road_segment_name)
+    
+    kml = simplekml.Kml()
+    for road_segment_name in relevant_road_segment_names:
+        if road_segment_name not in road_segment_by_name:
+            continue
+        road_segment = road_segment_by_name[road_segment_name]
+        line = kml.newlinestring(name=road_segment_name)
+        for point in road_segment:
+            longitude, latitude, altitute = enu2lla(point, unique_anchor)           
+            line.coords.addcoordinates([(longitude * 180 / PI, latitude * 180 / PI, 0)])
+        line.style.linestyle.color = "6000FFFF"
+        line.style.linestyle.width = 10
+    
+    kml.save(file_path)
 
 if __name__ == "__main__":
     road_kml_file = "./data/road_network/xian_road.kml"
@@ -252,8 +364,39 @@ if __name__ == "__main__":
     t2 = time.time()
     print("take {}s to set road network".format(t2 - t1))
 
-    traj_kml_file = "./data/trajectories/ed40697bfde345984ac096bd656df62f.kml"
-    t1 = time.time()
-    traj_points = ParseTrajectoryKmlData(traj_kml_file, unique_anchor)
+    traj_names = ["0b1a2b1ea6c62a7e07c702d79095dc5c", "0b1ae909da3facd0208de3b8cbd2c058", "0c36314e523cd05af508bc75c4463d7a"]
+    for traj_name in traj_names:
+        traj_kml_file = "./data/trajectories/{}.kml".format(traj_name)
+        traj_points = ParseTrajectoryKmlData(traj_kml_file, unique_anchor)
 
-    map_matcher.FindMatchedPath(traj_points)
+        t3 = time.time()
+        state_sequence = map_matcher.FindMatchedPath(traj_points)
+        t4 = time.time()
+        print("take {}s to find matched path".format(t4 - t3))
+
+        GenerateDebugFile(unique_anchor, road_segment_by_name, state_sequence, "./data/{}_matched.kml".format(traj_name))
+        
+        # traj_points里面存的是轨迹点的位置及时间戳，state_sequence里面存的是每个轨迹点匹配到的路段名称
+
+        # 下面给出计算最后一段轨迹点所在路段的代码，其他轨迹点所在路段的代码类似
+        last_state_name = None
+        e_state_idx = None
+        s_state_idx = None
+        for state_idx in range(len(state_sequence) - 1, -1, -1):
+            curr_state_name = state_sequence[state_idx]
+            if last_state_name is None and state_sequence[state_idx] != "UNKNOWN":
+                last_state_name = curr_state_name
+                e_state_idx = state_idx
+            if last_state_name is not None and last_state_name != curr_state_name:
+                s_state_idx = state_idx + 1
+                break
+        
+        if s_state_idx is not None and e_state_idx is not None:
+            print("车辆位于 {} 路段".format(last_state_name))
+            s_traj_point = traj_points[s_state_idx]
+            e_traj_point = traj_points[e_state_idx]
+
+            speed = numpy.linalg.norm((e_traj_point.point - s_traj_point.point)[0:2]) / (e_traj_point.time_stamp - s_traj_point.time_stamp)
+
+            print("车辆位于 {} 路段, 平均速度为{}".format(state_sequence[s_state_idx], speed))
+            print("------------------------")
