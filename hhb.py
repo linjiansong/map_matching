@@ -16,10 +16,11 @@ from util import lla2enu, enu2lla
 
 PI = 3.1415926535897932384626  # π
 
-class StampedPoint:
-    def __init__(self, point, time_stamp):
+class PointInfo:
+    def __init__(self, point, time_stamp, road_name="UNKNOWN"):
         self.point = point
         self.time_stamp = time_stamp
+        self.road_name = road_name
 
 class MapMatchingByHMM:
     def __init__(self) -> None:
@@ -127,43 +128,6 @@ class MapMatchingByHMM:
                 curr_road_idx = prev_road_idx
             part_state_sequence.reverse()
         return part_state_sequence
-    
-    def GenerateDebugFile(self, enu_traj_points, all_state_probabilities, optimal_paths):
-        kml = simplekml.Kml()
-        road_segments = list(self.road_segment_by_name.items())
-        for road_name, road_segment in road_segments:
-            line = kml.newlinestring(name=road_name)
-            for point in road_segment:
-                line.coords.addcoordinates([(point[0], point[1], 0)])
-            line.style.linestyle.color = simplekml.Color.red
-            line.style.linestyle.width = 3
-
-        for point_idx, point in enumerate(enu_traj_points):
-            point = numpy.array(point)
-            point[2] = 0
-            pnt = kml.newpoint(name=str(point_idx), coords=[tuple(point)])
-            pnt.style.iconstyle.icon.href = 'http://maps.google.com/mapfiles/kml/shapes/placemark_circle.png'
-            pnt.style.iconstyle.scale = 0.5
-
-        for point_idx, point in enumerate(enu_traj_points):
-            for road_idx, road_name in enumerate(self.road_segment_names):
-                if all_state_probabilities[point_idx, road_idx] > 0:
-                    point = numpy.array(point)
-                    point[2] = 0
-                    pnt = kml.newpoint(name=str(point_idx) + "_" + road_name, coords=[tuple(point)])
-                    pnt.style.iconstyle.icon.href = 'http://maps.google.com/mapfiles/kml/shapes/placemark_circle_highlight.png'
-                    pnt.style.iconstyle.scale = 0.5
-
-        for point_idx, point in enumerate(enu_traj_points):
-            for road_idx, road_name in enumerate(self.road_segment_names):
-                if optimal_paths[point_idx][road_idx] is not None:
-                    point = numpy.array(point)
-                    point[2] = 0
-                    pnt = kml.newpoint(name=str(point_idx) + "_" + road_name, coords=[tuple(point)])
-                    pnt.style.iconstyle.icon.href = 'http://maps.google.com/mapfiles/kml/shapes/placemark_circle_highlight.png'
-                    pnt.style.iconstyle.scale = 0.5
-
-        kml.save("./data/debug.kml")
 
     def FindMatchedPath(self, enu_traj_points):
         if self.road_segment_by_name is None:
@@ -310,7 +274,7 @@ def ParseRoadNetworkKmlData(kml_path):
 #                 traj_points.append(enu_point)
 #     return traj_points
 
-def ParseTrajectoryKmlData(kml_path, unique_anchor):
+def ParseRawTrajectoryKmlData(kml_path, unique_anchor):
     # 解析KML文件
     kml_data = None
     with open(kml_path, 'r') as f:
@@ -322,7 +286,7 @@ def ParseTrajectoryKmlData(kml_path, unique_anchor):
     # 查找Placemark元素
     placemarks = kml_data.findall('.//kml:Placemark', namespace)
 
-    traj_points = []
+    traj_point_info_list = []
     # 遍历Placemark元素
     for placemark in placemarks:
         time_stamp = int(placemark.TimeStamp.when.text)
@@ -330,10 +294,49 @@ def ParseTrajectoryKmlData(kml_path, unique_anchor):
         longitude = float(point[0])
         latitude = float(point[1])
         enu_point = lla2enu(longitude * PI / 180, latitude * PI / 180, 0, unique_anchor)
-        stamped_point = StampedPoint(enu_point, time_stamp)
-        traj_points.append(stamped_point)
+        point_info = PointInfo(enu_point, time_stamp)
+        traj_point_info_list.append(point_info)
 
-    return traj_points
+    return traj_point_info_list
+
+def ParseProcessedTrajectoryKmlData(kml_path, unique_anchor):
+    # 解析KML文件
+    kml_data = None
+    with open(kml_path, 'r') as f:
+        kml_data = parser.parse(f).getroot()
+
+    # 定义命名空间
+    namespace = {'kml': 'http://www.opengis.net/kml/2.2'}
+
+    # 查找Placemark元素
+    placemarks = kml_data.findall('.//kml:Placemark', namespace)
+
+    traj_point_info_list = []
+    # 遍历Placemark元素
+    for placemark in placemarks:
+        time_stamp = int(placemark.TimeStamp.when.text)
+        road_name = placemark.name.text
+        point = placemark.Point.coordinates.text.strip().split(',')
+        longitude = float(point[0])
+        latitude = float(point[1])
+        enu_point = lla2enu(longitude * PI / 180, latitude * PI / 180, 0, unique_anchor)
+        stamped_point = PointInfo(enu_point, time_stamp, road_name)
+        traj_point_info_list.append(stamped_point)
+
+    return traj_point_info_list
+
+def SaveProcessTrajecoryAsKml(traj_points, state_sequence, file_path):
+    kml = simplekml.Kml()
+    if len(traj_points) != len(state_sequence):
+        print("Error: len(traj_points) != len(state_sequence)")
+        return
+    
+    for point_idx, point in enumerate(traj_points):
+        lontitute, latitute, altitute = enu2lla(point.point, unique_anchor)
+        new_point = kml.newpoint(coords=[(lontitute * 180 / PI, latitute * 180 / PI, 0)])
+        new_point.timestamp.when = point.time_stamp
+        new_point.name = state_sequence[point_idx]
+    kml.save(file_path)
 
 def GenerateDebugFile(unique_anchor, road_segment_by_name, optimal_paths, file_path):
     relevant_road_segment_names = set()
@@ -355,48 +358,67 @@ def GenerateDebugFile(unique_anchor, road_segment_by_name, optimal_paths, file_p
     kml.save(file_path)
 
 if __name__ == "__main__":
-    road_kml_file = "./data/road_network/xian_road.kml"
-    t1 = time.time()
-    road_segment_by_name, unique_anchor = ParseRoadNetworkKmlData(road_kml_file)
-
-    map_matcher = MapMatchingByHMM()
-    map_matcher.SetRoadNetwork(road_segment_by_name)
-    t2 = time.time()
-    print("take {}s to set road network".format(t2 - t1))
-
     traj_names = ["0b1a2b1ea6c62a7e07c702d79095dc5c", "0b1ae909da3facd0208de3b8cbd2c058", "0c36314e523cd05af508bc75c4463d7a"]
-    for traj_name in traj_names:
-        traj_kml_file = "./data/trajectories/{}.kml".format(traj_name)
-        traj_points = ParseTrajectoryKmlData(traj_kml_file, unique_anchor)
 
-        t3 = time.time()
-        state_sequence = map_matcher.FindMatchedPath(traj_points)
-        t4 = time.time()
-        print("take {}s to find matched path".format(t4 - t3))
+    # Mode = "process"
+    Mode = "statistic"
 
-        GenerateDebugFile(unique_anchor, road_segment_by_name, state_sequence, "./data/{}_matched.kml".format(traj_name))
+    if Mode == "process":
+        road_kml_file = "./data/road_network/xian_road.kml"
+        t1 = time.time()
+        road_segment_by_name, unique_anchor = ParseRoadNetworkKmlData(road_kml_file)
+
+        map_matcher = MapMatchingByHMM()
+        map_matcher.SetRoadNetwork(road_segment_by_name)
+        t2 = time.time()
+        print("take {}s to set road network".format(t2 - t1))
+
+        for traj_name in traj_names:
+            traj_kml_file = "./data/trajectories/{}.kml".format(traj_name)
+            traj_point_info_list = ParseRawTrajectoryKmlData(traj_kml_file, unique_anchor)
+
+            t3 = time.time()
+            state_sequence = map_matcher.FindMatchedPath(traj_point_info_list)
+            t4 = time.time()
+            print("take {}s to find matched path".format(t4 - t3))
+
+            GenerateDebugFile(unique_anchor, road_segment_by_name, state_sequence, "./data/{}_matched.kml".format(traj_name))
+            SaveProcessTrajecoryAsKml(traj_point_info_list, state_sequence, "./data/processed_trajectories/{}_process.kml".format(traj_name))
+    
+    if Mode == "statistic":
+        # 锚点建议和"process"模式下的锚点一致
+        unique_anchor = numpy.array([1.9022442564921247, 0.5981393479806824, 0.0])
+
+        for traj_name in traj_names:
+            traj_kml_file = "./data/processed_trajectories/{}_process.kml".format(traj_name)
+            traj_point_info_list = ParseProcessedTrajectoryKmlData(traj_kml_file, unique_anchor)
+            print("len(traj_point_info_list) = {}".format(len(traj_point_info_list)))
+            # 具体怎么统计，根据具体情况具体分析
+            pass
+
+
         
         # traj_points里面存的是轨迹点的位置及时间戳，state_sequence里面存的是每个轨迹点匹配到的路段名称
 
         # 下面给出计算最后一段轨迹点所在路段的代码，其他轨迹点所在路段的代码类似
-        last_state_name = None
-        e_state_idx = None
-        s_state_idx = None
-        for state_idx in range(len(state_sequence) - 1, -1, -1):
-            curr_state_name = state_sequence[state_idx]
-            if last_state_name is None and state_sequence[state_idx] != "UNKNOWN":
-                last_state_name = curr_state_name
-                e_state_idx = state_idx
-            if last_state_name is not None and last_state_name != curr_state_name:
-                s_state_idx = state_idx + 1
-                break
+        # last_state_name = None
+        # e_state_idx = None
+        # s_state_idx = None
+        # for state_idx in range(len(state_sequence) - 1, -1, -1):
+        #     curr_state_name = state_sequence[state_idx]
+        #     if last_state_name is None and state_sequence[state_idx] != "UNKNOWN":
+        #         last_state_name = curr_state_name
+        #         e_state_idx = state_idx
+        #     if last_state_name is not None and last_state_name != curr_state_name:
+        #         s_state_idx = state_idx + 1
+        #         break
         
-        if s_state_idx is not None and e_state_idx is not None:
-            print("车辆位于 {} 路段".format(last_state_name))
-            s_traj_point = traj_points[s_state_idx]
-            e_traj_point = traj_points[e_state_idx]
+        # if s_state_idx is not None and e_state_idx is not None:
+        #     print("车辆位于 {} 路段".format(last_state_name))
+        #     s_traj_point = traj_points[s_state_idx]
+        #     e_traj_point = traj_points[e_state_idx]
 
-            speed = numpy.linalg.norm((e_traj_point.point - s_traj_point.point)[0:2]) / (e_traj_point.time_stamp - s_traj_point.time_stamp)
+        #     speed = numpy.linalg.norm((e_traj_point.point - s_traj_point.point)[0:2]) / (e_traj_point.time_stamp - s_traj_point.time_stamp)
 
-            print("车辆位于 {} 路段, 平均速度为{}".format(state_sequence[s_state_idx], speed))
-            print("------------------------")
+        #     print("车辆位于 {} 路段, 平均速度为{}".format(state_sequence[s_state_idx], speed))
+            # print("------------------------")
